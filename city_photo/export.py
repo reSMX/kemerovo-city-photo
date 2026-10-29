@@ -5,6 +5,7 @@ from collections import Counter
 from pathlib import Path
 from .schemas import OBJECTS, METRICS, SCORES
 from .pipeline import effective_metadata
+from .photo_scoring import assess_photo, load_rules
 
 def score_key(obj, metric):
     return 'litter_score' if obj == 'litter' else f'{obj}_{metric}_score'
@@ -27,9 +28,12 @@ def columns():
                'processing_status', 'needs_review', 'review_reasons', 'error', 'exact_duplicate_of',
                'near_duplicate_group_id', 'schema_version', 'rubric_version', 'rubric_hash', 'prompt_version',
                'prompt_hash', 'config_hash', 'model_name', 'model_digest', 'ollama_version', 'processed_at']
+    fields += ['photo_score', 'photo_score_status', 'photo_score_coverage', 'photo_score_lower_bound',
+               'photo_score_upper_bound', 'photo_score_metric_count', 'photo_score_reason',
+               'photo_scoring_version', 'photo_scoring_hash']
     return list(dict.fromkeys(fields))
 
-def flat_row(store, row, duplicate=None):
+def flat_row(store, row, duplicate=None, scoring_rules=None):
     meta = effective_metadata(store, row)
     v = json.loads(row['visual']) if row['visual'] else {}
     geo = json.loads(row['geo']) if row['geo'] else {}
@@ -73,6 +77,7 @@ def flat_row(store, row, duplicate=None):
     out['needs_review'] = int(bool(reasons))
     if v:
         out['processing_status'] = 'processed_with_review' if reasons else 'processed'
+    out.update(assess_photo(out,scoring_rules))
     return out
 
 def safe_cell(v):
@@ -100,11 +105,12 @@ def export_all(store, cfg, output):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     rows, first = [], {}
+    scoring_rules=load_rules(cfg.photo_scoring_path)
     for r in store.rows():
         duplicate = first.get(r['sha']) if r['sha'] else None
         if r['sha']:
             first.setdefault(r['sha'], r['image_id'])
-        rows.append(flat_row(store, r, duplicate))
+        rows.append(flat_row(store, r, duplicate, scoring_rules))
     write_csv(output / 'results.csv', rows, columns(), cfg.delimiter)
     write_csv(output / 'review.csv', (r for r in rows if r['needs_review']), columns(), cfg.delimiter)
     latest = store.db.execute('SELECT details FROM runs ORDER BY id DESC LIMIT 1').fetchone()
@@ -131,8 +137,16 @@ def dictionary():
         'courtyard_id': 'Только подтверждённый вручную ID; GPS — положение камеры',
         'courtyard_candidate_id': 'Кандидаты по карте, не координата объекта',
         'processing_status': 'pending/processed/processed_with_review/unreadable/unsupported/model_error',
-        'surface_type': 'paved/unpaved/mixed/unknown', 'mural_status': 'mural/no_mural/mural_or_graffiti_uncertain'}
-    lines = ['# Словарь CSV', '', 'UTF-8 BOM; разделитель ; по умолчанию. Пустая ячейка = null. Оценки целые 0–10.',
+        'surface_type': 'paved/unpaved/mixed/unknown', 'mural_status': 'mural/no_mural/mural_or_graffiti_uncertain',
+        'photo_score': 'Экспериментальный балл видимого состояния 0–10, больше лучше; не индекс двора/города',
+        'photo_score_status': 'available/provisional/insufficient_data; ни один статус не доказывает точность',
+        'photo_score_coverage': '0–1 доля взвешенной оценимой информации среди видимых/неуверенных объектов',
+        'photo_score_lower_bound': 'Нижняя граница при худшем состоянии всей неоценённой части; не статистический доверительный интервал',
+        'photo_score_upper_bound': 'Верхняя граница при лучшем состоянии всей неоценённой части; не статистический доверительный интервал',
+        'photo_score_metric_count': 'Число показателей с оценкой, вошедших в сумму',
+        'photo_score_reason': 'Ограничение или причина отсутствия итогового балла',
+        'photo_scoring_version': 'Версия формулы итогового балла', 'photo_scoring_hash': 'SHA-256 правил итогового балла'}
+    lines = ['# Словарь CSV', '', 'UTF-8 BOM; разделитель ; по умолчанию. Пустая ячейка = null. Объектные оценки целые 0–10; итоговый photo_score округлён до двух знаков.',
              'Для координат в Excel: Данные → Из текста/CSV → локаль English (United States), десятичная точка.',
              'Текст с началом формулы экранируется апострофом; SQLite хранит исходный текст.', '', '| Поле | Значение |', '|---|---|']
     for c in columns():

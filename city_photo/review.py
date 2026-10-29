@@ -6,9 +6,10 @@ from pathlib import Path
 from .export import flat_row, columns, write_csv, safe_cell
 from .schemas import OBJECTS, SCORES, TERRITORIES
 from .storage import now, dumps
+from .photo_scoring import load_rules
 
 EDITABLE = ['territory_type', *[f'{o}_present' for o in OBJECTS], *SCORES,
-            *[c for c in columns() if c.endswith(('_presence_status', '_assessability', '_visibility_reason', '_assessment_status', '_reason', '_description'))],
+            *[c for c in columns() if not c.startswith('photo_') and c.endswith(('_presence_status', '_assessability', '_visibility_reason', '_assessment_status', '_reason', '_description'))],
             'latitude', 'longitude', 'clockwise_rotation', 'courtyard_id', 'courtyard_assignment_status',
             'playground_courtyard_link_status', 'parking_courtyard_link_status']
 EDITABLE = list(dict.fromkeys(EDITABLE))
@@ -60,7 +61,8 @@ def validate_changes(current, changes):
 
 def review_export(store, cfg, output, limit=100):
     output = Path(output)
-    records = [flat_row(store, r) for r in store.rows()]
+    scoring_rules=load_rules(cfg.photo_scoring_path)
+    records = [flat_row(store, r, scoring_rules=scoring_rules) for r in store.rows()]
     # Connected dHash components, exact duplicates, same courtyard or 150m camera tile stay together.
     # Camera tiles are sampling guards only, never inferred courtyard boundaries.
     ids = {r['image_id']: i for i, r in enumerate(records)}
@@ -111,7 +113,7 @@ def review_export(store, cfg, output, limit=100):
     output.mkdir(parents=True, exist_ok=True)
     (output/'sample_manifest.json').write_text(dumps({'seed': cfg.seed, 'sampling': 'stratified territory/review; one per connected group; inspect adjacent tiles manually', 'samples': manifest}), encoding='utf-8')
     write_csv(output/'labels.csv', [dict(image_id=m['image_id'], relative_path=m['relative_path'], split=m['split']) for m in manifest],
-              ['image_id', 'relative_path', 'split', 'territory_type', *[f'{o}_present' for o in OBJECTS], *SCORES], cfg.delimiter)
+              ['image_id', 'relative_path', 'split', 'territory_type', *[f'{o}_present' for o in OBJECTS], *SCORES, 'photo_score'], cfg.delimiter)
     write_csv(output/'corrections.csv', [dict(image_id=r['image_id'], relative_path=r['relative_path']) for r in records],
               ['image_id', 'relative_path', 'author', 'reason', *EDITABLE], cfg.delimiter)
     write_csv(output/'current_values.csv', records, columns(), cfg.delimiter)

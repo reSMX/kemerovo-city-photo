@@ -1,9 +1,11 @@
 import csv
 from .schemas import OBJECTS, SCORES, TERRITORIES
 from .export import flat_row, safe_cell
+from .photo_scoring import load_rules
 
 def evaluate(store, cfg, labels):
-    predictions = {r['image_id']: flat_row(store, r) for r in store.rows()}
+    scoring_rules=load_rules(cfg.photo_scoring_path)
+    predictions = {r['image_id']: flat_row(store, r, scoring_rules=scoring_rules) for r in store.rows()}
     matched = []
     with open(labels, encoding='utf-8-sig', newline='') as f:
         for label in csv.DictReader(f, delimiter=cfg.delimiter):
@@ -53,7 +55,7 @@ def evaluate(store, cfg, labels):
     result['territory'] = dict(confusion_matrix=matrix, macro_f1=sum(f1s)/len(f1s) if f1s else None,
                                support={a: sum(matrix[a].values()) for a in TERRITORIES},
                                reason=None if f1s else 'No labelled territory observations')
-    for key in SCORES:
+    for key in (*SCORES,'photo_score'):
         pairs, labelled, abstained, uncertain_truth, false_confident = [], 0, 0, 0, 0
         for l,p in matched:
             v = l.get(key, '')
@@ -64,7 +66,7 @@ def evaluate(store, cfg, labels):
                 uncertain_truth += 1
                 false_confident += pred is not None
                 continue
-            score = int(v)
+            score = float(v) if key=='photo_score' else int(v)
             if not 0 <= score <= 10:
                 raise ValueError('Labelled score outside 0..10')
             labelled += 1

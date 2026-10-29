@@ -114,7 +114,7 @@ def analyze(store, cfg, limit=None, resume=False, retry_errors=False, force=Fals
     if dry_run:
         return {'dry_run': True, 'files': len(store.rows()), 'limit': limit, 'model': cfg.model, 'no_inference': True}
     identity = backend.identity()
-    params = cfg.model_dump(exclude={'input', 'map_path', 'courtyards_path', 'gps_buffer_m', 'delimiter', 'normalize_timezone', 'timezone_assumption', 'prompt_path', 'rubric_path'})
+    params = cfg.model_dump(exclude={'input', 'map_path', 'courtyards_path', 'gps_buffer_m', 'delimiter', 'normalize_timezone', 'timezone_assumption', 'prompt_path', 'rubric_path', 'photo_scoring_path'})
     base = {'preprocessing': 'v3-exif-auto-orientation-short', 'schema': visual_schema(), 'config': params,
             'identity': identity, 'prompt_hash': digest(prompt), 'rubric_hash': digest(rubric)}
     model_prompt = prompt + '\nRUBRIC:\n' + rubric

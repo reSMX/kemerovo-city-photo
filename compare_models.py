@@ -1,9 +1,11 @@
 """Compare two local Qwen variants on twelve identical originals; resumable."""
 import argparse
+import csv
 import hashlib
 import json
 import random
 import statistics
+from datetime import datetime, timedelta
 from pathlib import Path
 from city_photo.config import load
 from city_photo.storage import Store, dumps, now
@@ -12,9 +14,24 @@ from city_photo.pipeline import analyze
 from city_photo.export import export_all, flat_row, write_csv
 from city_photo.review import review_export
 from city_photo.vision import Ollama
+from city_photo.photo_scoring import load_rules
 
 INSTRUCT='qwen3-vl:4b-instruct-q4_K_M'
 THINKING='qwen3-vl:4b'
+
+def write_review_csv(path,rows,fields,human_fields,delimiter=';'):
+    path=Path(path)
+    if path.exists():
+        with path.open(encoding='utf-8-sig',newline='') as f:
+            previous={r['image_id']:r for r in csv.DictReader(f,delimiter=delimiter)}
+        for row in rows:
+            old=previous.get(row['image_id'],{})
+            if old and old['relative_path']!=row['relative_path']:
+                raise ValueError('Review identifier/path mismatch; annotations left untouched')
+            for key in human_fields:
+                if old.get(key) not in (None,''):
+                    row[key]=old[key]
+    write_csv(path,rows,fields,delimiter)
 
 class SharedOrientation(Ollama):
     def __init__(self,cfg,orientation_cfg,output):
@@ -47,7 +64,7 @@ def compare_metrics(left,right):
         p=[(a.get(key),b.get(key)) for a,b in paired]
         report['presence'][obj]=dict(n=len(p),disagreements=sum(a!=b for a,b in p),
             status_disagreements=sum(a.get(obj+'_presence_status')!=b.get(obj+'_presence_status') for a,b in paired))
-    for key in SCORES:
+    for key in (*SCORES,'photo_score'):
         p=[(a.get(key),b.get(key)) for a,b in paired]
         diffs=[abs(a-b) for a,b in p if a is not None and b is not None]
         report['scores'][key]=dict(n_comparable=len(diffs),mean_absolute_difference=statistics.mean(diffs) if diffs else None,
@@ -99,16 +116,34 @@ def main():
                            backend=SharedOrientation(model_cfg,orientation_cfg,output))
             (output/f'{name}_run.json').write_text(dumps(report),encoding='utf-8')
         export_all(st,model_cfg,output/name/'export')
-    rows={name:[flat_row(st,r) for r in st.rows()] for name,st in stores.items()}
+    scoring_rules=load_rules(cfg.photo_scoring_path)
+    rows={name:[flat_row(st,r,scoring_rules=scoring_rules) for r in st.rows()] for name,st in stores.items()}
     # Store.rows has the same stable path order for both workspaces.
     report=compare_metrics(rows['instruct'],rows['thinking'])
+    full_wall_times={name:{} for name in models}
     for name,st in stores.items():
         records=st.rows()
         run_file=output/f'{name}_run.json'
         run=json.loads(run_file.read_text(encoding='utf-8')) if run_file.exists() else {}
+        for record in records:
+            timing=json.loads(record['provenance']).get('timing') or {}
+            if timing.get('total_processing_seconds') is not None:
+                full_wall_times[name][record['image_id']]=timing['total_processing_seconds']
+        # Compatibility with the first run made before per-file wall timers were added.
+        # Only infer sequential intervals for a complete, uninterrupted, uncached batch.
+        if run.get('processed')==len(records) and run.get('cache_hits')==0 and run.get('finished_at'):
+            finish=datetime.fromisoformat(run['finished_at'])
+            previous=finish-timedelta(seconds=run['elapsed_seconds'])
+            ordered=sorted((r for r in records if r['processed_at']),key=lambda r:r['processed_at'])
+            if len(ordered)==len(records) and all(previous<=datetime.fromisoformat(r['processed_at'])<=finish for r in ordered):
+                for r in ordered:
+                    end=datetime.fromisoformat(r['processed_at'])
+                    full_wall_times[name].setdefault(r['image_id'],(end-previous).total_seconds())
+                    previous=end
         report[name]=dict(model=models[name],statuses={status:sum(r['status']==status for r in records) for status in set(r['status'] for r in records)},
                          last_run_elapsed_seconds=run.get('elapsed_seconds'),
                          degraded_files=sum(bool(json.loads(r['provenance']).get('degraded')) for r in records),
+                         completed_files_with_retries=sum(bool(json.loads(r['provenance']).get('inference_errors')) for r in records),
                          assessment_seconds=sum((json.loads(r['provenance']).get('stats',{}).get('total_duration') or 0)/1e9 for r in records),
                          assessment_tokens=sum((json.loads(r['provenance']).get('stats',{}).get('eval_count') or 0) for r in records))
         measured=[]
@@ -127,7 +162,7 @@ def main():
             max_seconds_per_photo=max(measured) if measured else None,
             mean_seconds_excluding_model_load=statistics.mean(compute) if compute else None,
             total_model_load_seconds=sum(loads),
-            all_attempts_wall_seconds_per_selected_photo=run.get('elapsed_seconds')/len(samples) if run.get('elapsed_seconds') is not None else None,
+            all_attempts_wall_seconds_per_selected_photo=statistics.mean(full_wall_times[name].values()) if len(full_wall_times[name])==len(records) else None,
             note='Ollama total_duration of successful assessment requests; includes request-side model load, excludes separate shared orientation. Wall average includes orientation, failures, retries, loading and preprocessing; resumed runs may include only remaining files.')
     report.update(created_at=now(),notes=['Differences, not accuracy: independent human labels required.',
         'Identical 12 originals and shared orientation from Instruct; 1280px, context 16384, output limit 12288, temperature .2, seed 42.',
@@ -139,8 +174,9 @@ def main():
     (output/'model_key.json').write_text(dumps({letter:models[name] for letter,name in zip(('A','B'),order)}),encoding='utf-8')
     blind=[]
     fields=['image_id','relative_path','original_file','upright_copy','A_processing_status','B_processing_status']
-    measures=['territory_type',*[f'{o}_present' for o in OBJECTS],*SCORES]
-    explanations=['territory_description',*[f'{o}_presence_status' for o in OBJECTS],*[s.replace('_score','_description') for s in SCORES],*[s.replace('_score','_assessment_status') for s in SCORES],*[s.replace('_score','_reason') for s in SCORES]]
+    measures=['territory_type',*[f'{o}_present' for o in OBJECTS],*SCORES,'photo_score']
+    explanations=['territory_description',*[f'{o}_presence_status' for o in OBJECTS],*[s.replace('_score','_description') for s in SCORES],*[s.replace('_score','_assessment_status') for s in SCORES],*[s.replace('_score','_reason') for s in SCORES],
+                  'photo_score_status','photo_score_coverage','photo_score_lower_bound','photo_score_upper_bound','photo_score_reason']
     for key in measures+explanations:
         fields.extend(['A_'+key,'B_'+key])
     fields.extend('human_'+key for key in measures)
@@ -156,7 +192,7 @@ def main():
             for key in measures+explanations:
                 record[letter+'_'+key]=p.get(key)
         blind.append(record)
-    write_csv(output/'blind_review.csv',blind,fields,cfg.delimiter)
+    write_review_csv(output/'blind_review.csv',blind,fields,[f for f in fields if f.startswith('human_')],cfg.delimiter)
     timing_rows=[]
     for sample in samples:
         iid=sample['image_id']
@@ -165,6 +201,7 @@ def main():
             raw=st.db.execute('SELECT provenance,status FROM photos WHERE image_id=?',(iid,)).fetchone()
             stats=json.loads(raw['provenance']).get('stats') or {}
             record[name+'_status']=raw['status']
+            record[name+'_all_attempts_wall_seconds']=full_wall_times[name].get(iid)
             for key in ('total_duration','load_duration','eval_duration'):
                 value=stats.get(key)
                 record[name+'_'+key+'_seconds']=value/1e9 if value is not None else None
@@ -174,11 +211,11 @@ def main():
         timing_rows.append(record)
     timing_fields=['image_id','relative_path']
     for name in models:
-        timing_fields.extend([name+'_status',*[name+'_'+key+'_seconds' for key in ('total_duration','load_duration','eval_duration')],name+'_generated_tokens'])
+        timing_fields.extend([name+'_status',name+'_all_attempts_wall_seconds',*[name+'_'+key+'_seconds' for key in ('total_duration','load_duration','eval_duration')],name+'_generated_tokens'])
     timing_fields.append('thinking_to_instruct_ratio')
     write_csv(output/'timings.csv',timing_rows,timing_fields,cfg.delimiter)
     human=[dict(image_id=s['image_id'],relative_path=original[s['image_id']]['relative_path']) for s in samples]
-    write_csv(output/'human_labels.csv',human,['image_id','relative_path',*measures],cfg.delimiter)
+    write_review_csv(output/'human_labels.csv',human,['image_id','relative_path',*measures],measures,cfg.delimiter)
     lines=['# Сравнение двух локальных Qwen на 12 фото','',
            f'Пар с валидными ответами: {report["n_valid_pairs"]}/{report["n_photos"]}.',
            f'Совпадение типа территории: {report["territory_agreement"]}.','',

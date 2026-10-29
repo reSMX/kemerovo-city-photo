@@ -1,7 +1,7 @@
 import csv
 from PIL import Image
 import pytest
-from split_photos import split_photos
+from split_photos import split_photos, verify_batch
 from merge_results import merge_results
 from city_photo.export import write_csv
 from city_photo.metadata import sha_file
@@ -19,6 +19,7 @@ def test_balanced_copy_resume_originals(tmp_path):
     assert len(list((dest/'part_2').glob('*.jpg')))==2
     assert {p.name:sha_file(p) for p in source.iterdir()}==hashes
     assert split_photos(source,dest)==counts
+    assert verify_batch(dest/'part_2',dest/'part_2_manifest.json')['verified_files']==2
     with pytest.raises(ValueError):
         split_photos(source,source/'nested')
 

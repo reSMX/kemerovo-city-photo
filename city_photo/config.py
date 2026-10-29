@@ -37,6 +37,7 @@ class Config(Strict):
     delimiter: str = ';'
     prompt_path: str | None = None
     rubric_path: str | None = None
+    photo_scoring_path: str | None = None
 
     @model_validator(mode='after')
     def safe(self):
@@ -61,7 +62,7 @@ def load(path=None):
         return Config()
     p = Path(path).resolve()
     values = yaml.safe_load(p.read_text(encoding='utf-8-sig')) or {}
-    for key in ('input', 'map_path', 'courtyards_path', 'prompt_path', 'rubric_path'):
+    for key in ('input', 'map_path', 'courtyards_path', 'prompt_path', 'rubric_path', 'photo_scoring_path'):
         if values.get(key) and not Path(values[key]).is_absolute():
             values[key] = str((p.parent / values[key]).resolve())
     return Config(**values)

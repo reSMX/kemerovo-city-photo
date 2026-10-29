@@ -24,6 +24,8 @@ Python 3.11+, Windows/PowerShell; желательно NVIDIA GPU. Объём VR
 измерить, а не предполагать по названию карты. Из корня клона:
 
 ```powershell
+git clone https://github.com/reSMX/kemerovo-city-photo.git
+Set-Location kemerovo-city-photo
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[test]"
 ollama pull qwen3-vl:4b-instruct-q4_K_M
@@ -34,10 +36,12 @@ ollama pull qwen3-vl:4b-instruct-q4_K_M
 Установить/запустить Ollama, если отсутствует. Анализ обращается только к
 http://127.0.0.1:11434, по одному запросу. Для запрета облака самой Ollama можно запустить
 её с OLLAMA_NO_CLOUD=1. Сеть нужна только для установки, весов и отдельной подготовки карты.
-Модель по умолчанию — Instruct. Thinking также сравнивается на первом устройстве;
-не подменять модель скрыто. До совместного производственного запуска пользователь
+Модель по умолчанию — Instruct. В выполненном на первом устройстве сравнении она дала
+валидный ответ 12/12, Thinking 11/12. Не подменять модель скрыто. До совместного производственного запуска пользователь
 может выбрать другую модель по ручному сравнению: зафиксировать ОДИН тег/digest,
 рубрику, промпт и настройки на обоих устройствах.
+Для итогового балла также согласовать photo_scoring.yaml; он описан в SCORING.md.
+После изменения весов достаточно export, без нового инференса.
 
 На 16 ГБ RAM не держать обе модели загруженными одновременно. Скрипт compare_models.py
 выгружает предыдущий из двух сравниваемых вариантов через keep_alive=0, не удаляя веса.
@@ -54,6 +58,7 @@ http://127.0.0.1:11434, по одному запросу. Для запрета 
 Copy-Item config.example.yaml config.part2.yaml
 # В config.part2.yaml задать input: D:/map_photos_split/part_2
 # Остальные параметры, prompts/assessment.txt и rubric.yaml согласовать с первым устройством.
+.\.venv\Scripts\python.exe split_photos.py --input D:\map_photos_split\part_2 --verify-manifest D:\map_photos_split\part_2_manifest.json
 .\run.ps1 prepare -InputFolder D:\map_photos_split\part_2 -Workspace work_part2 -OutputFolder output_part2 -Config config.part2.yaml
 .\run.ps1 sample -Workspace work_part2 -OutputFolder output_part2 -Config config.part2.yaml
 ```

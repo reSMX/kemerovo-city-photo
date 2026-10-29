@@ -22,7 +22,7 @@ def merge_results(inputs,output,delimiter=';',allow_mixed=False):
                 ids.add(row['image_id'])
                 paths.add(row['relative_path'])
                 if row['processing_status'].startswith('processed'):
-                    versions.add(tuple(row[k] for k in ('model_digest','prompt_hash','rubric_hash','schema_version')))
+                    versions.add(tuple(row[k] for k in ('model_digest','prompt_hash','rubric_hash','schema_version'))+(row.get('photo_scoring_hash',''),))
                 rows.append(row)
     if len(versions)>1 and not allow_mixed:
         raise ValueError('Different model/prompt/rubric versions; explicitly use --allow-mixed only for a labelled mixed export')

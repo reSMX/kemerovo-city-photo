@@ -24,3 +24,4 @@ timezone_assumption: Asia/Krasnoyarsk
 delimiter: ';'
 prompt_path: prompts/assessment.txt
 rubric_path: rubric.yaml
+photo_scoring_path: photo_scoring.yaml

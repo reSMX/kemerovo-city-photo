@@ -8,6 +8,21 @@ from city_photo.metadata import FORMATS, sha_file
 from city_photo.config import digest
 from city_photo.storage import now
 
+def verify_batch(source,manifest_path):
+    source=Path(source).resolve()
+    manifest=json.loads(Path(manifest_path).read_text(encoding='utf-8'))
+    expected={r['relative_path']:r for r in manifest['files']}
+    actual={p.relative_to(source).as_posix() for p in source.rglob('*') if p.is_file() and p.suffix.lower() in FORMATS}
+    if actual!=set(expected):
+        raise ValueError('Batch file list differs from manifest')
+    for relative,record in expected.items():
+        path=(source/relative).resolve()
+        if source not in path.parents:
+            raise ValueError('Manifest path escapes photo folder')
+        if sha_file(path)!=record['sha256']:
+            raise ValueError('Batch checksum mismatch')
+    return {'verified_files':len(expected),'part':manifest.get('part')}
+
 def split_photos(source,destination):
     source,destination=Path(source).resolve(),Path(destination).resolve()
     if not source.is_dir():
@@ -63,6 +78,12 @@ def split_photos(source,destination):
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--input',required=True)
-    p.add_argument('--output',required=True)
+    p.add_argument('--output')
+    p.add_argument('--verify-manifest')
     a=p.parse_args()
-    print(json.dumps(split_photos(a.input,a.output)))
+    if a.verify_manifest:
+        print(json.dumps(verify_batch(a.input,a.verify_manifest)))
+    elif a.output:
+        print(json.dumps(split_photos(a.input,a.output)))
+    else:
+        p.error('Provide --output for splitting or --verify-manifest for verification')
