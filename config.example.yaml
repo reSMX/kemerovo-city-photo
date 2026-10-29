@@ -1,0 +1,26 @@
+# Пути относительно этого файла. Оригиналы не изменяются.
+input: D:/map_photos
+ollama_url: http://127.0.0.1:11434
+model: qwen3-vl:4b-instruct-q4_K_M
+context: 8192
+max_tokens: 4096
+long_side: 1280
+fallback_long_side: 960
+fallback_context: 6144
+timeout: 300
+retries: 1
+seed: 42
+thinking: false
+temperature: 0.0
+auto_orientation: true
+dark_threshold: 35.0
+blur_threshold: 70.0
+duplicate_distance: 5
+map_path: null
+courtyards_path: null
+gps_buffer_m: 30.0
+normalize_timezone: false
+timezone_assumption: Asia/Krasnoyarsk
+delimiter: ';'
+prompt_path: prompts/assessment.txt
+rubric_path: rubric.yaml

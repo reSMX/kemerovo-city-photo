@@ -1,0 +1,278 @@
+# Локальная оценка фотографий Кемерово
+
+Python CLI для независимого анализа кадров через локальную Ollama: EXIF, ориентация,
+видимые объекты, оценки 0–10/null, локальная география, SQLite, CSV, ручные исправления.
+Оригиналы никогда не перезаписываются. Вход по умолчанию `D:\map_photos`.
+Веб-интерфейса нет. Работа не ограничивается Радугой.
+
+Для запуска на двух устройствах см. [AGENT_RUNBOOK.md](AGENT_RUNBOOK.md).
+`split_photos.py` создаёт две равные группы копий и манифесты; `merge_results.py`
+объединяет непересекающиеся CSV с проверкой версий. Фото/манифесты/результаты не включаются в Git.
+
+## Установка Windows
+
+Проверено на Python 3.14.2, Windows, RTX 3060 12288 MiB. Требуется Python 3.11+.
+В PowerShell из папки проекта:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[test]"
+# Для точного воспроизведения проверенного окружения Python 3.14 Windows:
+# .\.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
+```
+
+Установить Ollama с https://ollama.com/download/windows и запустить приложение.
+Модель скачивается только отдельным подготовительным действием:
+
+```powershell
+ollama pull qwen3-vl:4b-instruct-q4_K_M
+.\run.ps1 doctor
+```
+
+Для Qwen3-VL официально требуется Ollama 0.12.7+. Проверен явный тег `qwen3-vl:4b-instruct-q4_K_M`,
+Q4_K_M, около 3.3 GB весов; это не оценка VRAM. Версия сервера, digest модели,
+параметры и хеши ресурсов сохраняются с каждым результатом. Тег `qwen3-vl:4b`
+на дату проверки указывает на Thinking-веса a1b29c246319: в реальной проверке
+он исчерпал бюджет без финального JSON даже с think=false. Поэтому в конфигурации
+явно выбран Instruct той же размерности; результаты разных digest не смешиваются в кэше.
+Используется
+`POST /api/chat`, массив base64 `images`, JSON Schema в `format`, `stream=false`,
+`think=false`, temperature 0, seed 42; отдельная валидация Pydantic после API.
+Нет гарантии побитовой воспроизводимости GPU. Один запрос одновременно.
+
+`config.example.yaml` уже указывает входную папку. Для изменений скопируйте его в
+`config.yaml` и передавайте `-Config config.yaml` скрипту или `--config config.yaml` CLI.
+Пути конфигурации разрешаются относительно её файла. По умолчанию 8192 контекст,
+4096 ограничение ответа, 1280 длинная сторона; при OOM один повтор с 960/6144,
+деградация попадает в проверку. Автоперехода на другие модели нет.
+
+## Первый запуск → 20 фото → CSV → весь архив
+
+```powershell
+.\run.ps1 prepare
+.\run.ps1 sample
+Invoke-Item .\output\results.csv
+# После просмотра малой выборки:
+.\run.ps1 all
+```
+
+`sample` обрабатывает до 20 ещё требующих обработки файлов; успешно завершённые
+не повторяются. После выполненного smoke-test это следующие 20, а не повтор первого.
+Импорт последовательно читает архив, не держит оригиналы в памяти; SQLite фиксирует
+каждый файл. Повторный импорт пропускает неизменённое содержимое, новые файлы добавляет.
+Для другого входного корня нужен отдельный workspace. Файлы, исчезнувшие из исходной
+папки, остаются в историческом реестре: явно проверяйте существование источника.
+
+### Добавление новых фото в будущем
+
+Добавьте снимки в ту же входную папку и выполните:
+
+```powershell
+.\run.ps1 update
+# Или другая папка (используйте отдельный workspace для нового архива):
+# .\run.ps1 update -InputFolder D:\another_archive -Workspace work_another -OutputFolder output_another
+```
+
+Команда переимпортирует реестр и запускает resume: неизменённые успешно обработанные
+кадры повторно в модель не отправляются. Добавленный точный дубликат получает отдельную
+строку с собственным EXIF и подходящий визуальный кэш без повторного инференса.
+При замене содержимого файла по старому пути анализируется новая версия. При намеренной
+смене модели, рубрики, промпта или настроек изображения прежняя оценка не выдаётся за
+новую: соответствующие записи пересчитываются. Ошибки текущей версии повторяются
+отдельной командой retry. Сохраните папку work со state.sqlite и ресурсами конфигурации.
+
+Прерывание Ctrl+C оставляет завершённые записи. Продолжение: `.\run.ps1 all`.
+Для повторения ошибок: `.\run.ps1 retry`. Ошибочные оценки остаются пустыми.
+Ошибка чтения/модели одного фото не прерывает остальные.
+
+Ориентация: Pillow применяет EXIF 1–8, включая зеркальные преобразования. Затем
+Qwen независимо определяет дополнительный поворот 0/90/180/270; при неопределённости
+поворот не применяется, ставится флаг проверки. Самооценка модели не гарантия:
+ошибочный EXIF, необычный ракурс и кадры без ориентиров требуют просмотра.
+`work/derived/` хранит очищенную от EXIF производную копию для проверки; исходные
+метаданные сохранены в SQLite. Фотографии не передаются Codex для просмотра.
+
+## Все команды
+
+Вместо `city-photo` можно всегда использовать `.\.venv\Scripts\python.exe -m city_photo`.
+Опции `--workspace work --config config.example.yaml` доступны каждой команде.
+
+```powershell
+.\.venv\Scripts\python.exe -m city_photo doctor
+.\.venv\Scripts\python.exe -m city_photo init --workspace work
+.\.venv\Scripts\python.exe -m city_photo import --input D:\map_photos --workspace work
+.\.venv\Scripts\python.exe -m city_photo analyze --workspace work --limit 20 --resume
+.\.venv\Scripts\python.exe -m city_photo analyze --workspace work --resume
+.\.venv\Scripts\python.exe -m city_photo analyze --workspace work --retry-errors
+.\.venv\Scripts\python.exe -m city_photo analyze --workspace work --dry-run
+.\.venv\Scripts\python.exe -m city_photo geolocate --workspace work --config config.example.yaml
+.\.venv\Scripts\python.exe -m city_photo export --workspace work --output output
+.\.venv\Scripts\python.exe -m city_photo review-export --workspace work --output output --limit 100
+.\.venv\Scripts\python.exe -m city_photo review-import --workspace work --file output/corrections.csv
+.\.venv\Scripts\python.exe -m city_photo benchmark --workspace work --limit 3 --force
+.\.venv\Scripts\python.exe -m city_photo evaluate --workspace work --labels output/labels.csv
+```
+
+Без `--force` корректный кэш используется всегда; `--resume` явно документирует такое
+намерение. `--retry-errors` повторяет ошибки текущего ключа, `--force` повторяет все
+выбранные визуальные результаты, включая дубликаты, но сохраняет ручные правки.
+`--limit` ограничивает число обрабатываемых записей, включая кэш-дубликаты, не импорт.
+`--dry-run` не вызывает Ollama. Benchmark без force может показать попадания в кэш;
+для скорости реального инференса используйте force и смотрите cache_hits. GPU память
+измеряется до/после, не пиковая; ETA приблизителен. Не экстраполируйте без замера.
+
+## Карта и конкретные дворы
+
+Анализ работает без карты: `geo_status=map_unavailable`. Скачивание карты во время
+анализа запрещено. В первой версии реализован импорт готового GeoJSON; автоматического
+экспорта OSM нет. Никакие координаты отдельных фото не используются в сетевых запросах.
+
+Получение настоящей карты вручную: в https://overpass-turbo.eu выполните следующий
+запрос по административной территории всего города, затем Export → GeoJSON. Проверьте
+название и границу отношения в https://www.openstreetmap.org перед использованием.
+Результат и дата выгрузки должны храниться локально. При таймауте сервиса повторите
+загрузку позднее; не заменяйте границу приблизительным прямоугольником.
+
+```text
+[out:json][timeout:180];
+rel["boundary"="administrative"]["name"="Кемерово"];
+map_to_area->.city;
+(
+  rel["boundary"="administrative"]["name"="Кемерово"];
+  way(area.city)["building"];
+  way(area.city)["highway"];
+  nwr(area.city)["leisure"~"^(park|garden)$"];
+  way(area.city)["highway"="pedestrian"];
+);
+out geom;
+```
+
+GeoJSON должен быть FeatureCollection EPSG:4326, координаты `[долгота, широта]`.
+Добавьте свойство `layer`: `boundary` для проверенной границы города, `building`,
+`road`, `park`, `pedestrian`. Допустимы Polygon/MultiPolygon, линии дорог.
+Неправильная/пустая геометрия отклоняется. Голый экспорт без layer сохраняется,
+но не даёт территориальных кандидатов: подготовьте свойства в QGIS.
+
+```powershell
+.\.venv\Scripts\python.exe -m city_photo prepare-map --import-file C:\Maps\kemerovo.geojson --output maps/kemerovo.geojson --source https://www.openstreetmap.org --license ODbL-1.0 --attribution "© OpenStreetMap contributors"
+# В config.yaml: map_path: maps/kemerovo.geojson
+.\.venv\Scripts\python.exe -m city_photo geolocate --workspace work --config config.yaml
+```
+
+Сохраняются источник, атрибуция, лицензия, SHA-256 и время импорта в соседнем
+`.provenance.json`. Время импорта не выдаётся за время съёмки/актуальность OSM.
+Метрические расчёты — EPSG:32645 (UTM 45N), не градусы; подходит Кемерово.
+Буфер 30 м при неизвестной точности — допущение. Координаты вне города/у границ
+отмечаются; визуальная классификация сохраняется при конфликте с картой.
+GPS — точка камеры, кандидат карты не доказывает содержание кадра.
+
+Полигоны дворов: создайте отдельный GeoJSON в QGIS с `courtyard_id`, `layer=courtyard`,
+`verification=verified|proposed`, источник проверки. Укажите `courtyards_path`.
+Все автоматические связи остаются candidate, даже внутри полигона. После ручной
+проверки задайте courtyard_id и courtyard_assignment_status=confirmed через corrections.
+Соседство домов, landuse=residential и service-проезд не доказывают двор.
+Площадка/парковка не получает вымышленную координату; хранится только статус связи.
+
+## Экспорт, правки, разметка
+
+`results.csv` — все файлы, включая дубликаты, неподдерживаемые и повреждённые.
+`review.csv` — проверка; `run_summary.json` — статусы, ошибки, конфигурация и скорость;
+`data_dictionary.md` — каждый столбец. UTF-8 BOM, `;`, корректные кавычки,
+пустое значение означает null. Excel: импорт из CSV, для координат локаль English
+(United States), десятичная точка. Формулоподобный текст получает защитный апостроф.
+SQLite хранит неэкранированный оригинальный текст. Экспорты заменяются атомарно.
+
+После `review-export`: `current_values.csv` для просмотра, `corrections.csv` для правок,
+`labels.csv` для независимой разметки, `sample_manifest.json` с seed и списком выборки.
+Пустая correction означает «не менять», `<NULL>` — очистить; author и reason обязательны.
+Для неверного автоматического поворота задайте clockwise_rotation=0/90/180/270
+как дополнительный поворот после EXIF и снова выполните analyze --resume. Такой поворот
+входит в ключ визуального кэша; <NULL> возвращает автоматическую проверку.
+Указывайте все затронутые согласованные поля, например при смене present обновите
+presence_status и очистите несовместимые баллы с причиной. Некорректный файл исправлений
+целиком отклоняется до записи. Изменения хранятся отдельным аудируемым слоем; сырые
+ответы остаются в `work/raw`, правки не затираются повторным анализом.
+После изменения координат/территории команда правок пересчитывает географию.
+Машинные причины проверки сохраняются для аудита, даже если человек исправил оценку.
+
+В labels пустое = «не размечено»; для неоценимого балла используйте not_assessable,
+unknown или <NULL>. Для присутствия 0/1, для категории — справочник territory_type.
+Выборка стратифицирована по типу/флагу проверки, один представитель связной группы.
+Дубликаты, dHash, известный двор и одна камера-ячейка 150 м не разрываются между
+calibration/control. Соседние ячейки и похожие ракурсы обязательно проверьте вручную:
+автоматическая эвристика не доказывает независимость участков. Это не границы дворов.
+Для независимого контроля сохраняйте manifest, не переиспользуйте labels после калибровки.
+Evaluate считает число сопоставимых наблюдений, F1/матрицу территории, presence P/R/F1,
+MAE, долю отклонений ≤2, отказы, ошибочную уверенность и долю проверки. Отсутствие данных
+даёт null с причиной. Пустые значения не становятся нулями.
+
+## Приватность и воспроизводимость
+
+Инференс принимает только literal loopback http endpoint, игнорирует системные proxy,
+блокирует HTTP redirect. Ни импорт, ни анализ, ни геопривязка, ни экспорт не имеют
+внешних сетевых вызовов или автоматической загрузки весов. После установки модель
+можно использовать без интернета. Для запрета облачных функций самой Ollama задайте
+`OLLAMA_NO_CLOUD=1` перед запуском её приложения/сервера (потребуется его перезапуск).
+Программа не вызывает облачные функции. Не публикуйте work/output: там локальные фото,
+координаты, описания. Логи не содержат base64; raw хранит только текст ответа модели.
+
+Ключ кэша: SHA-256 оригинала, preprocessing/schema, digest/версия Ollama, параметры,
+промпт, рубрика и ориентация как часть политики preprocessing. Карта/координаты отдельно:
+`geolocate` не вызывает vision. Метаданные точного дубликата не заимствуются.
+Сильная темнота и размытие — эвристики проверки, не доказательство брака.
+HEIF опционально: `pip install pillow-heif==1.1.1`. ExifTool опционально с
+https://exiftool.org/ (Windows executable переименовать в exiftool.exe, добавить в PATH),
+импорт `--exiftool` включает fallback GPS. Pillow по умолчанию читает EXIF из оригинала.
+
+## Проверки
+
+### Сравнение Instruct и Thinking на 12 фото
+
+Оба варианта оставлены установленными. Для воспроизведения локального сравнения:
+
+```powershell
+.\.venv\Scripts\python.exe compare_models.py --workspace work --output comparison_12
+```
+
+Скрипт фиксирует выборку из 12 разных групп, использует одинаковые оригиналы и общую
+проверку ориентации через Instruct. Обеим моделям выделяется контекст 16384 и лимит
+ответа 12288, temperature=0.2, seed=42. Thinking включается явно только для Thinking.
+Это сравнение результатов при рабочем бюджете, а не при искусственно коротком лимите.
+Веса `qwen3-vl:4b` и `qwen3-vl:4b-instruct-q4_K_M` должны быть подготовлены заранее.
+Повторный запуск продолжает завершённые записи. `--phase instruct|thinking|report`
+позволяет отдельно запускать этапы и пересобрать отчёт без повторного инференса.
+
+В comparison_12: REPORT.md, comparison_summary.json, blind_review.csv с A/B рядом,
+human_labels.csv для независимой разметки, model_key.json для раскрытия названий,
+shared_orientation.json, timings.csv со временем каждого кадра и отдельные SQLite/CSV/сырые ответы двух моделей.
+Ссылки на оригиналы и подготовленные копии — локальные пути в blind_review.csv.
+Лучше сначала заполнить human_labels по фото, потом смотреть ответы A/B.
+
+После заполнения одинаковой разметки сравните качество:
+
+```powershell
+.\.venv\Scripts\python.exe -m city_photo evaluate --workspace comparison_12/instruct --labels comparison_12/human_labels.csv --output comparison_12/instruct_evaluation.json
+.\.venv\Scripts\python.exe -m city_photo evaluate --workspace comparison_12/thinking --labels comparison_12/human_labels.csv --output comparison_12/thinking_evaluation.json
+```
+
+Без разметки отчёт показывает согласие категорий, расхождения presence, абсолютную
+разницу баллов, несовпадения null и время: среднее, медиану, минимум/максимум,
+загрузку модели отдельно и общее время с повторами. Он не утверждает, какая модель правильнее.
+Выборка 12 мала: это первичная диагностика, не доказательство качества на всём архиве.
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
+```
+
+Фикстуры тестов синтетические, создаются во временных каталогах; они проверяют код,
+а не качество модели. `examples/demo_results.csv` — демонстрация формата, не оценка фото.
+Реальные измерения см. `VALIDATION.md`. Качество для исследования требует 50–100
+независимых ручных разметок: macro-F1 около 0.8 и MAE до 2 — ориентиры, не обещание.
+Нет единого индекса города/двора и выводов о жителях или конструктивной безопасности.
+
+Официальные источники, проверены 2026-10-29:
+https://docs.ollama.com/capabilities/vision,
+https://docs.ollama.com/capabilities/structured-outputs,
+https://ollama.com/library/qwen3-vl:4b,
+https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct,
+https://wiki.openstreetmap.org/wiki/Tag:landuse%3Dresidential.
