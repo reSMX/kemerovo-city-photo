@@ -89,6 +89,12 @@ def main():
             'temperature':0.2,'context':16384,'max_tokens':12288,'timeout':900,'retries':1})
         if args.phase in ('all',name):
             print(f'Starting {name}: {len(samples)} images; local inference only',flush=True)
+            # On 16 GB hosts, retaining both runners can exhaust Windows commit memory.
+            control=Ollama(model_cfg)
+            loaded=control.request('/api/ps').get('models',[])
+            for resident in loaded:
+                if resident.get('name') in models.values() and resident.get('name')!=model:
+                    control.request('/api/generate',{'model':resident['name'],'keep_alive':0})
             report=analyze(st,model_cfg,resume=True,retry_errors=True,
                            backend=SharedOrientation(model_cfg,orientation_cfg,output))
             (output/f'{name}_run.json').write_text(dumps(report),encoding='utf-8')
