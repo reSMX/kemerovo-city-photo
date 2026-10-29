@@ -1,0 +1,27 @@
+# Full archive on one computer; Instruct settings used in the 12-photo comparison.
+input: D:/map_photos
+ollama_url: http://127.0.0.1:11434
+model: qwen3-vl:4b-instruct-q4_K_M
+context: 16384
+max_tokens: 12288
+long_side: 1280
+fallback_long_side: 960
+fallback_context: 6144
+timeout: 900
+retries: 1
+seed: 42
+thinking: false
+temperature: 0.2
+auto_orientation: true
+dark_threshold: 35.0
+blur_threshold: 70.0
+duplicate_distance: 5
+map_path: null
+courtyards_path: null
+gps_buffer_m: 30.0
+normalize_timezone: false
+timezone_assumption: Asia/Krasnoyarsk
+delimiter: ';'
+prompt_path: prompts/assessment.txt
+rubric_path: rubric.yaml
+photo_scoring_path: photo_scoring.yaml
