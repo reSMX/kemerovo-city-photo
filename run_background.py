@@ -61,10 +61,18 @@ def main():
         backend=Ollama(cfg)
         guard=MemoryGuard(backend.cancel_for_memory)
         recoveries=0
+        total_recoveries=0
         def unload():
             guard.paused=True
             try:
                 backend.request('/api/generate',{'model':cfg.model,'keep_alive':0})
+                # Windows releases committed runner memory shortly after the unload reply.
+                release_deadline=time.monotonic()+10
+                while time.monotonic()<release_deadline:
+                    reserve=available_commit_bytes()
+                    if reserve is None or reserve>=5*1024**3:
+                        break
+                    time.sleep(.25)
             finally:
                 guard.paused=False
         def publish():
@@ -73,7 +81,8 @@ def main():
             tmp.write_text(json.dumps(status,ensure_ascii=False,indent=2),encoding='utf-8')
             tmp.replace(workspace/'analysis_status.json')
         def checkpoint(done):
-            nonlocal last_export
+            nonlocal last_export,recoveries
+            recoveries=0
             publish()
             if done%10==0 or time.monotonic()-last_export>=60:
                 try:
@@ -83,9 +92,11 @@ def main():
                     print(f'CSV export deferred: {type(e).__name__}',flush=True)
             if stop.exists():
                 raise KeyboardInterrupt()
-            if done%20==0:
+            reserve=available_commit_bytes()
+            if done%20==0 or (reserve is not None and reserve<5*1024**3):
                 print('Recycling Ollama runner to release accumulated host memory.',flush=True)
                 unload()
+                backend.memory_abort.clear()
         awake=False
         try:
             if os.name=='nt':
@@ -93,6 +104,9 @@ def main():
                 awake=bool(ctypes.windll.kernel32.SetThreadExecutionState(0x80000001))
             publish()
             guard.start()
+            reserve=available_commit_bytes()
+            if reserve is not None and reserve<5*1024**3:
+                unload()
             # Recompute all saved photo scores with current rules; no vision call here.
             export_all(store,cfg,args.output)
             last_export=time.monotonic()
@@ -102,7 +116,8 @@ def main():
                     break
                 except SystemMemoryPressure:
                     recoveries+=1
-                    status.update(memory_recoveries=recoveries)
+                    total_recoveries+=1
+                    status.update(memory_recoveries=total_recoveries,consecutive_memory_recoveries=recoveries)
                     print('Memory reserve low: unloading model; saved photos retained.',flush=True)
                     unload()
                     reserve=available_commit_bytes()
