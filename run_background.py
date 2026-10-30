@@ -49,6 +49,8 @@ def main():
     parser.add_argument('--config',default='config.full.yaml')
     parser.add_argument('--workspace',default='work')
     parser.add_argument('--output',default='output')
+    parser.add_argument('--memory-guard',action=argparse.BooleanOptionalAction,default=False,
+                        help='Stop when Windows commit reserve is low (disabled by default)')
     args=parser.parse_args()
     cfg=load(args.config)
     workspace=Path(args.workspace).resolve()
@@ -56,7 +58,8 @@ def main():
         store=Store(workspace)
         stop=workspace/'stop.request'
         stop.unlink(missing_ok=True)
-        status=dict(pid=os.getpid(),started_at=now(),state='running',config=str(Path(args.config).resolve()))
+        status=dict(pid=os.getpid(),started_at=now(),state='running',config=str(Path(args.config).resolve()),
+                    memory_guard_enabled=args.memory_guard)
         last_export=0.0
         backend=Ollama(cfg)
         guard=MemoryGuard(backend.cancel_for_memory)
@@ -92,7 +95,7 @@ def main():
                     print(f'CSV export deferred: {type(e).__name__}',flush=True)
             if stop.exists():
                 raise KeyboardInterrupt()
-            reserve=available_commit_bytes()
+            reserve=available_commit_bytes() if args.memory_guard else None
             if done%20==0 or (reserve is not None and reserve<5*1024**3):
                 print('Recycling Ollama runner to release accumulated host memory.',flush=True)
                 unload()
@@ -103,8 +106,9 @@ def main():
                 import ctypes
                 awake=bool(ctypes.windll.kernel32.SetThreadExecutionState(0x80000001))
             publish()
-            guard.start()
-            reserve=available_commit_bytes()
+            if args.memory_guard:
+                guard.start()
+            reserve=available_commit_bytes() if args.memory_guard else None
             if reserve is not None and reserve<5*1024**3:
                 unload()
             # Recompute all saved photo scores with current rules; no vision call here.
@@ -120,7 +124,7 @@ def main():
                     status.update(memory_recoveries=total_recoveries,consecutive_memory_recoveries=recoveries)
                     print('Memory reserve low: unloading model; saved photos retained.',flush=True)
                     unload()
-                    reserve=available_commit_bytes()
+                    reserve=available_commit_bytes() if args.memory_guard else None
                     if recoveries>3 or (reserve is not None and reserve<4*1024**3):
                         raise RuntimeError('Stopped for memory reserve; close other memory-heavy programs before resuming')
                     backend.memory_abort.clear()
