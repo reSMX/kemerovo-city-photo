@@ -70,7 +70,7 @@ def flat_row(store, row, duplicate=None, scoring_rules=None):
         reasons.append('orientation_uncertain')
     if prov.get('degraded'):
         reasons.append('reduced_resolution_or_context')
-    if row['status'] in ('model_error', 'unsupported', 'unreadable', 'pending'):
+    if row['status'] in ('model_error', 'manual_review', 'unsupported', 'unreadable', 'pending'):
         reasons.append(row['status'])
     out.update(store.overrides(row['image_id']))
     out['review_reasons'] = ' | '.join(sorted(set(reasons)))
@@ -112,6 +112,7 @@ def export_all(store, cfg, output):
             first.setdefault(r['sha'], r['image_id'])
         rows.append(flat_row(store, r, duplicate, scoring_rules))
     write_csv(output / 'results.csv', rows, columns(), cfg.delimiter)
+    write_csv(output / 'processed_results.csv', (r for r in rows if r['processing_status'].startswith('processed')), columns(), cfg.delimiter)
     write_csv(output / 'review.csv', (r for r in rows if r['needs_review']), columns(), cfg.delimiter)
     latest = store.db.execute('SELECT details FROM runs ORDER BY id DESC LIMIT 1').fetchone()
     summary = dict(total_files=len(rows), statuses=dict(Counter(r['processing_status'] for r in rows)),
@@ -136,7 +137,7 @@ def dictionary():
         'near_duplicate_group_id': 'Кандидаты dHash, оценки не копируются', 'map_hash': 'Версия карты и геоправил',
         'courtyard_id': 'Только подтверждённый вручную ID; GPS — положение камеры',
         'courtyard_candidate_id': 'Кандидаты по карте, не координата объекта',
-        'processing_status': 'pending/processed/processed_with_review/unreadable/unsupported/model_error',
+        'processing_status': 'pending/processed/processed_with_review/unreadable/unsupported/model_error/manual_review (90-second deadline)',
         'surface_type': 'paved/unpaved/mixed/unknown', 'mural_status': 'mural/no_mural/mural_or_graffiti_uncertain',
         'photo_score': 'Экспериментальный балл видимого состояния 0–10, больше лучше; не индекс двора/города',
         'photo_score_status': 'available/provisional/insufficient_data; ни один статус не доказывает точность',

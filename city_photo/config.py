@@ -38,6 +38,9 @@ class Config(Strict):
     prompt_path: str | None = None
     rubric_path: str | None = None
     photo_scoring_path: str | None = None
+    photo_deadline_seconds: float = Field(default=90.0, gt=0, le=90)
+    preprocess_workers: int = Field(default=2, ge=1, le=4)
+    preprocess_buffer: int = Field(default=4, ge=1, le=16)
 
     @model_validator(mode='after')
     def safe(self):

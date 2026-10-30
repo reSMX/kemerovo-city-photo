@@ -25,3 +25,6 @@ delimiter: ';'
 prompt_path: prompts/assessment.txt
 rubric_path: rubric.yaml
 photo_scoring_path: photo_scoring.yaml
+photo_deadline_seconds: 90.0
+preprocess_workers: 2
+preprocess_buffer: 4

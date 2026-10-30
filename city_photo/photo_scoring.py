@@ -14,6 +14,12 @@ def load_rules(path=None):
         raise ValueError('Invalid score information thresholds')
     if rules['minimum_condition_metrics']<1 or rules['minimum_condition_objects']<1:
         raise ValueError('At least one condition metric/object must be required')
+    for name,default in (('baseline_quality',10.0),('damage_penalty',1.0),('vegetation_reference',10.0),('vegetation_bonus_per_point',1.0)):
+        value=rules.get(name,default)
+        if type(value) not in (int,float) or not math.isfinite(value) or value<0:
+            raise ValueError(f'Invalid scoring parameter: {name}')
+    if rules.get('baseline_quality',10)>10 or rules.get('vegetation_reference',10)>10:
+        raise ValueError('Scoring baseline/reference must be within 0..10')
     return rules
 
 DEFAULT=load_rules()
@@ -44,7 +50,12 @@ def assess_photo(row,rules=None):
             continue
         factor=1.0 if status=='assessable' else rules['partial_information_factor']
         observed_weight=weight*factor
-        quality=score if key=='vegetation_abundance_score' else 10-score
+        baseline=rules.get('baseline_quality',10.0)
+        if key=='vegetation_abundance_score':
+            quality=(baseline+rules.get('vegetation_bonus_per_point',1.0)*(score-rules.get('vegetation_reference',baseline)))
+        else:
+            quality=baseline-rules.get('damage_penalty',1.0)*score
+        quality=max(0.0,min(10.0,quality))
         known+=observed_weight
         weighted+=quality*observed_weight
         metric_count+=1

@@ -2,6 +2,12 @@ import base64
 import json
 import urllib.request
 import urllib.error
+import http.client
+import socket
+import threading
+import time
+from urllib.parse import urlsplit
+from .execution import PhotoDeadlineExceeded, remaining
 from .schemas import Visual, Orientation, visual_schema
 
 class TruncatedResponse(ValueError):
@@ -18,6 +24,70 @@ class Ollama:
         self.cfg = cfg
         # Ignore environment proxy settings; all inference remains local.
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+        self.deadline=None
+
+    def begin_photo(self,deadline):
+        self.deadline=deadline
+
+    def end_photo(self):
+        self.deadline=None
+
+    def _stream_chat(self,body):
+        # Closing the actual streaming connection propagates request cancellation to Ollama.
+        end=self.deadline or (time.monotonic()+self.cfg.photo_deadline_seconds)
+        budget=min(remaining(end),self.cfg.timeout)
+        endpoint=urlsplit(self.cfg.ollama_url)
+        conn=http.client.HTTPConnection(endpoint.hostname,endpoint.port or 80,timeout=budget)
+        expired=threading.Event()
+        sockets=[]
+        chunks=[]
+        response=None
+        def cancel():
+            expired.set()
+            for sock in sockets:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+            conn.close()
+        timer=threading.Timer(budget,cancel)
+        timer.daemon=True
+        timer.start()
+        try:
+            conn.connect()
+            sockets.append(conn.sock)
+            remaining(end)
+            conn.request('POST','/api/chat',body=json.dumps(body).encode(),headers={'Content-Type':'application/json','Connection':'close'})
+            response=conn.getresponse()
+            if response.status!=200:
+                raise RuntimeError(f'Ollama HTTP {response.status}')
+            while True:
+                remaining(end)
+                line=response.readline()
+                if not line:
+                    raise RuntimeError('Ollama stream ended without final completion')
+                part=json.loads(line)
+                if part.get('error'):
+                    raise RuntimeError(str(part['error']))
+                chunks.append(part.get('message',{}).get('content',''))
+                if part.get('done') or part.get('done_reason') in ('stop','length','unload'):
+                    remaining(end)
+                    part['message']={'content':''.join(chunks)}
+                    return part
+        except Exception as e:
+            if expired.is_set() or time.monotonic()>=end:
+                raise PhotoDeadlineExceeded(''.join(chunks)) from e
+            raise
+        finally:
+            timer.cancel()
+            for sock in sockets:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+            if response:
+                response.close()
+            conn.close()
 
     def request(self, route, body=None):
         req = urllib.request.Request(self.cfg.ollama_url.rstrip('/') + route,
@@ -43,8 +113,8 @@ class Ollama:
                     quantization=model.get('details', {}).get('quantization_level'), capabilities=info.get('capabilities'))
 
     def chat(self, image, prompt, schema, context=None, tokens=None):
-        response = self.request('/api/chat', {
-            'model': self.cfg.model, 'stream': False, 'think': self.cfg.thinking, 'keep_alive': '5m',
+        response = self._stream_chat({
+            'model': self.cfg.model, 'stream': True, 'think': self.cfg.thinking, 'keep_alive': '5m',
             'format': schema,
             'messages': [{'role': 'user', 'content': prompt,
                           'images': [base64.b64encode(image).decode('ascii')]}],

@@ -9,6 +9,7 @@ from .geo import Geography
 from .schemas import Visual, visual_schema
 from .vision import Ollama
 from pydantic import ValidationError
+from .execution import PreparationBuffer, PhotoDeadlineExceeded, remaining
 
 def diagnostic(error):
     if isinstance(error, ValidationError):
@@ -108,13 +109,13 @@ def geolocate(store, cfg):
         result = geo.locate(effective_metadata(store, row), visual)
         store.update(row['image_id'], geo=result)
 
-def analyze(store, cfg, limit=None, resume=False, retry_errors=False, force=False, dry_run=False, backend=None):
+def analyze(store, cfg, limit=None, resume=False, retry_errors=False, force=False, dry_run=False, backend=None, on_progress=None):
     backend = backend or Ollama(cfg)
     prompt, rubric = cfg.assets()
     if dry_run:
         return {'dry_run': True, 'files': len(store.rows()), 'limit': limit, 'model': cfg.model, 'no_inference': True}
     identity = backend.identity()
-    params = cfg.model_dump(exclude={'input', 'map_path', 'courtyards_path', 'gps_buffer_m', 'delimiter', 'normalize_timezone', 'timezone_assumption', 'prompt_path', 'rubric_path', 'photo_scoring_path'})
+    params = cfg.model_dump(exclude={'input', 'map_path', 'courtyards_path', 'gps_buffer_m', 'delimiter', 'normalize_timezone', 'timezone_assumption', 'prompt_path', 'rubric_path', 'photo_scoring_path', 'photo_deadline_seconds', 'preprocess_workers', 'preprocess_buffer'})
     base = {'preprocessing': 'v3-exif-auto-orientation-short', 'schema': visual_schema(), 'config': params,
             'identity': identity, 'prompt_hash': digest(prompt), 'rubric_hash': digest(rubric)}
     model_prompt = prompt + '\nRUBRIC:\n' + rubric
@@ -126,103 +127,141 @@ def analyze(store, cfg, limit=None, resume=False, retry_errors=False, force=Fals
     except Exception as e:
         geo_error = f'{type(e).__name__}: map could not be loaded'
         geo = Geography(cfg.model_copy(update={'map_path': None, 'courtyards_path': None}))
-    targets = store.rows()
-    for row in targets:
+    selected=[]
+    for row in store.rows():
         if row['status'] in ('unsupported', 'unreadable'):
             continue
         rotation_override = store.overrides(row['image_id']).get('clockwise_rotation')
         key = digest([row['sha'], base, rotation_override])
         if not force and row['visual'] and row['cache_key'] == key:
             continue
-        if row['status'] == 'model_error' and not (retry_errors or force) and row['cache_key'] == key:
+        if row['status'] in ('model_error','manual_review') and not (retry_errors or force) and row['cache_key'] == key:
             continue
-        if limit is not None and done >= limit:
+        selected.append((row,key,rotation_override))
+        if limit is not None and len(selected)>=limit:
             break
-        if not Path(row['source']).is_file() or sha_file(row['source']) != row['sha']:
-            store.update(row['image_id'], status='unreadable', error='Source missing or changed: import again', visual=None, geo=None)
-            continue
-        hit = None if force else store.db.execute('SELECT * FROM cache WHERE key=?', (key,)).fetchone()
-        provenance = dict(identity, config_hash=digest(cfg.model_dump()), prompt_version='1', rubric_version='1',
-                          prompt_hash=digest(prompt), rubric_hash=digest(rubric), schema_version='1')
-        visual, errors = None, []
-        file_started = time.monotonic()
-        assessment_wall = 0.0
-        orientation_wall = 0.0
-        if hit:
-            visual = json.loads(hit['visual'])
-            provenance = dict(json.loads(hit['provenance']), config_hash=digest(cfg.model_dump()), cache_hit=True)
-            cached += 1
-        else:
-            side, context = cfg.long_side, cfg.context
-            rotation, orientation = 0, None
-            if rotation_override is not None:
-                rotation = rotation_override
-                orientation = dict(clockwise_rotation=rotation, certain=True, reason='Manual correction after EXIF')
-            for attempt in range(cfg.retries + 1):
-                raw = None
+    targets=[item[0] for item in selected]
+    preparer=PreparationBuffer(targets,cfg.long_side,cfg.preprocess_workers,cfg.preprocess_buffer)
+    try:
+        for row,key,rotation_override in selected:
+            hit = None if force else store.db.execute('SELECT * FROM cache WHERE key=?', (key,)).fetchone()
+            provenance = dict(identity, config_hash=digest(cfg.model_dump()), prompt_version='1', rubric_version='1',
+                              prompt_hash=digest(prompt), rubric_hash=digest(rubric), schema_version='1')
+            visual, errors = None, []
+            file_started = time.monotonic()
+            deadline=file_started+cfg.photo_deadline_seconds
+            if hasattr(backend,'begin_photo'):
+                backend.begin_photo(deadline)
+            timed_out=False
+            preparation_failed=False
+            cpu_seconds=0.0
+            assessment_wall = 0.0
+            orientation_wall = 0.0
+            if hit:
+                preparer.discard(row['image_id'])
+                visual = json.loads(hit['visual'])
+                provenance = dict(json.loads(hit['provenance']), config_hash=digest(cfg.model_dump()), cache_hit=True)
+                cached += 1
+            else:
+                side, context = cfg.long_side, cfg.context
+                prepared=None
                 try:
-                    image = prepare(row['source'], side)
-                    if cfg.auto_orientation and orientation is None:
+                    prepared=preparer.take(row['image_id'],deadline)
+                    cpu_seconds=prepared.cpu_seconds
+                except PhotoDeadlineExceeded as e:
+                    timed_out=True
+                    errors.append(diagnostic(e))
+                except Exception as e:
+                    preparation_failed=True
+                    errors.append(diagnostic(e))
+                rotation, orientation = 0, None
+                if rotation_override is not None:
+                    rotation = rotation_override
+                    orientation = dict(clockwise_rotation=rotation, certain=True, reason='Manual correction after EXIF')
+                for attempt in range(cfg.retries + 1):
+                    if prepared is None:
+                        break
+                    raw = None
+                    try:
+                        remaining(deadline)
+                        image = prepared.image if side==cfg.long_side else preparer.rotated(row,side,0,deadline)
+                        if cfg.auto_orientation and orientation is None:
+                            phase_started = time.monotonic()
+                            try:
+                                orientation = backend.orientation(image)
+                            finally:
+                                orientation_wall += time.monotonic() - phase_started
+                            rotation = orientation['clockwise_rotation'] if orientation['certain'] else 0
+                        if rotation:
+                            image = preparer.rotated(row,side,rotation,deadline)
+                        feedback = '\nPrevious response was invalid. Correct these rules: ' + ' | '.join(errors) if errors else ''
                         phase_started = time.monotonic()
                         try:
-                            orientation = backend.orientation(image)
+                            raw, stats = backend.assess(image, model_prompt + feedback, context)
                         finally:
-                            orientation_wall += time.monotonic() - phase_started
-                        rotation = orientation['clockwise_rotation'] if orientation['certain'] else 0
-                    if rotation:
-                        image = prepare(row['source'], side, rotation)
-                    feedback = '\nPrevious response was invalid. Correct these rules: ' + ' | '.join(errors) if errors else ''
-                    phase_started = time.monotonic()
-                    try:
-                        raw, stats = backend.assess(image, model_prompt + feedback, context)
+                            assessment_wall += time.monotonic() - phase_started
+                        visual = Visual.model_validate_json(raw).model_dump()
+                        remaining(deadline)
+                        provenance.update(orientation=orientation, clockwise_rotation=rotation, long_side=side,
+                                          context=context, stats=stats, degraded=side != cfg.long_side,
+                                          inference_errors=errors)
+                        # Save metadata-free, correctly oriented derived image locally for review.
+                        derived = store.path / 'derived'
+                        derived.mkdir(exist_ok=True)
+                        (derived / f'{row["image_id"]}.jpg').write_bytes(image)
+                        break
+                    except Exception as e:
+                        visual=None
+                        raw = getattr(e, 'raw', raw)
+                        errors.append(diagnostic(e))
+                        if isinstance(e,PhotoDeadlineExceeded) or time.monotonic()>=deadline:
+                            timed_out=True
+                            break
+                        if any(s in str(e).lower() for s in ('memory', 'cuda', 'vram', 'allocat')):
+                            side, context = cfg.fallback_long_side, cfg.fallback_context
+                        if attempt < cfg.retries:
+                            time.sleep(min(1,max(0,deadline-time.monotonic())))
                     finally:
-                        assessment_wall += time.monotonic() - phase_started
-                    visual = Visual.model_validate_json(raw).model_dump()
-                    provenance.update(orientation=orientation, clockwise_rotation=rotation, long_side=side,
-                                      context=context, stats=stats, degraded=side != cfg.long_side,
-                                      inference_errors=errors)
-                    # Save metadata-free, correctly oriented derived image locally for review.
-                    derived = store.path / 'derived'
-                    derived.mkdir(exist_ok=True)
-                    (derived / f'{row["image_id"]}.jpg').write_bytes(image)
-                    break
-                except Exception as e:
-                    raw = getattr(e, 'raw', raw)
-                    errors.append(diagnostic(e))
-                    if any(s in str(e).lower() for s in ('memory', 'cuda', 'vram', 'allocat')):
-                        side, context = cfg.fallback_long_side, cfg.fallback_context
-                    if attempt < cfg.retries:
-                        time.sleep(1)
-                finally:
-                    rawdir = store.path / 'raw'
-                    rawdir.mkdir(exist_ok=True)
-                    (rawdir / f'{row["image_id"]}-{run_stamp}-{attempt}.json').write_text(dumps({'raw': raw, 'errors': errors}), encoding='utf-8')
-        if not hit:
-            provenance['timing'] = dict(total_processing_seconds=time.monotonic()-file_started,
-                assessment_requests_seconds=assessment_wall, orientation_requests_seconds=orientation_wall)
-        if visual:
-            geographical = geo.locate(effective_metadata(store, row), visual)
-            if geo_error:
-                geographical['geo_status'] = 'map_error'
-                geographical['geo_review_reasons'].append(geo_error)
-            review = bool(visual['review_reasons'] or geographical['geo_review_reasons'] or json.loads(row['metadata']).get('quality_flags')
-                          or provenance.get('degraded') or (provenance.get('orientation') and not provenance['orientation']['certain'])
-                          or visual['territory_visual'] in ('mixed', 'unknown') or visual['mural_status'].endswith('uncertain')
-                          or any(o['presence_status'] == 'uncertain' or o['assessability'] in ('partial', 'not_assessable') for o in visual['objects'].values())
-                          or any(m['assessment_status'] in ('partial', 'not_assessable') for o in visual['objects'].values() for m in o['metrics'].values()))
-            # Cache and per-file result are one durable transaction.
-            with store.db:
-                store.db.execute('INSERT OR REPLACE INTO cache VALUES (?,?,?)', (key, dumps(visual), dumps(provenance)))
-                store.db.execute('UPDATE photos SET status=?,visual=?,geo=?,cache_key=?,provenance=?,error=NULL,processed_at=? WHERE image_id=?',
-                                 ('processed_with_review' if review else 'processed', dumps(visual), dumps(geographical), key, dumps(provenance), now(), row['image_id']))
-        else:
-            store.update(row['image_id'], status='model_error', visual=None, geo=None, cache_key=key, provenance=provenance,
-                         error=' | '.join(errors), processed_at=now())
-        done += 1
-        elapsed = time.monotonic() - start
-        remaining = max(0, min(len(targets), limit or len(targets)) - done)
-        eta = f'{remaining * elapsed / done:.0f}s' if done >= 3 else 'warming up'
-        print(f'{done} processed, {remaining} remaining | {row["relative_path"]} | {elapsed:.1f}s | ETA {eta}', flush=True)
+                        rawdir = store.path / 'raw'
+                        rawdir.mkdir(exist_ok=True)
+                        (rawdir / f'{row["image_id"]}-{run_stamp}-{attempt}.json').write_text(dumps({'raw': raw, 'errors': errors}), encoding='utf-8')
+            if not hit:
+                provenance['timing'] = dict(total_processing_seconds=time.monotonic()-file_started,
+                    assessment_requests_seconds=assessment_wall, orientation_requests_seconds=orientation_wall,
+                    preprocessing_cpu_seconds=cpu_seconds)
+                provenance.update(photo_deadline_seconds=cfg.photo_deadline_seconds,deadline_exceeded=timed_out,inference_errors=errors)
+            if visual:
+                geographical = geo.locate(effective_metadata(store, row), visual)
+                if geo_error:
+                    geographical['geo_status'] = 'map_error'
+                    geographical['geo_review_reasons'].append(geo_error)
+                review = bool(visual['review_reasons'] or geographical['geo_review_reasons'] or json.loads(row['metadata']).get('quality_flags')
+                              or provenance.get('degraded') or (provenance.get('orientation') and not provenance['orientation']['certain'])
+                              or visual['territory_visual'] in ('mixed', 'unknown') or visual['mural_status'].endswith('uncertain')
+                              or any(o['presence_status'] == 'uncertain' or o['assessability'] in ('partial', 'not_assessable') for o in visual['objects'].values())
+                              or any(m['assessment_status'] in ('partial', 'not_assessable') for o in visual['objects'].values() for m in o['metrics'].values()))
+                # Cache and per-file result are one durable transaction.
+                with store.db:
+                    store.db.execute('INSERT OR REPLACE INTO cache VALUES (?,?,?)', (key, dumps(visual), dumps(provenance)))
+                    store.db.execute('UPDATE photos SET status=?,visual=?,geo=?,cache_key=?,provenance=?,error=NULL,processed_at=? WHERE image_id=?',
+                                     ('processed_with_review' if review else 'processed', dumps(visual), dumps(geographical), key, dumps(provenance), now(), row['image_id']))
+            else:
+                status='manual_review' if timed_out else 'unreadable' if preparation_failed else 'model_error'
+                store.update(row['image_id'], status=status, visual=None, geo=None, cache_key=key, provenance=provenance,
+                             error=' | '.join(errors), processed_at=now())
+            done += 1
+            elapsed = time.monotonic() - start
+            remaining_count = max(0,len(targets)-done)
+            eta = f'{remaining_count * elapsed / done:.0f}s' if done >= 3 else 'warming up'
+            print(f'{done} processed, {remaining_count} remaining | {row["relative_path"]} | {elapsed:.1f}s | ETA {eta}', flush=True)
+            if hasattr(backend,'end_photo'):
+                backend.end_photo()
+            if on_progress:
+                on_progress(done)
+    finally:
+        preparer.close()
+        if hasattr(backend,'end_photo'):
+            backend.end_photo()
     report = dict(processed=done, cache_hits=cached, elapsed_seconds=time.monotonic()-start,
                   seconds_per_photo=(time.monotonic()-start)/done if done else None, identity=identity,
                   config=cfg.model_dump(), finished_at=now())

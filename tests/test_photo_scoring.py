@@ -8,7 +8,7 @@ def row():
 def test_score_direction_and_absence():
     r=row()
     a=assess_photo(r)
-    assert a['photo_score']==7.08 and a['photo_score_coverage']==1
+    assert a['photo_score']==4.35 and a['photo_score_coverage']==1
     assert assess_photo(dict(r,road_damage_score=8))['photo_score']<a['photo_score']
     assert assess_photo(dict(r,parking_present=0,parking_presence_status='absent'))['photo_score']==a['photo_score']
     low=assess_photo(dict(r,vegetation_presence_status='present',vegetation_abundance_score=1,vegetation_abundance_assessment_status='assessable'))
@@ -32,3 +32,11 @@ def test_formula_changes_need_no_model_call():
     a,b=assess_photo(row()),assess_photo(row(),rules)
     assert a['photo_score']!=b['photo_score']
     assert a['photo_scoring_hash']!=b['photo_scoring_hash']
+
+def test_version_two_baseline_penalties_and_moderate_vegetation_bonus():
+    clean=dict(row(),road_damage_score=0,sidewalk_damage_score=0)
+    assert assess_photo(clean)['photo_score']==8
+    poor=dict(row(),road_damage_score=9,sidewalk_damage_score=10)
+    assert assess_photo(poor)['photo_score']==0
+    green=dict(clean,vegetation_presence_status='present',vegetation_abundance_score=10,vegetation_abundance_assessment_status='assessable')
+    assert 8<assess_photo(green)['photo_score']<9

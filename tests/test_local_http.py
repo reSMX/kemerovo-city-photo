@@ -26,7 +26,7 @@ def test_local_api_ignores_external_proxy(monkeypatch):
             calls.append(self.path)
             if self.path=='/api/show':
                 return self.respond({'capabilities':['vision']})
-            assert body['stream'] is False and body['think'] is False
+            assert body['stream'] is True and body['think'] is False
             assert len(body['messages'][0]['images'])==1
             assert isinstance(body['format'],dict)
             orientation='clockwise_rotation' in body['format']['properties']
