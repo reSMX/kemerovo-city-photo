@@ -9,7 +9,7 @@ from .geo import Geography
 from .schemas import Visual, visual_schema
 from .vision import Ollama
 from pydantic import ValidationError
-from .execution import PreparationBuffer, PhotoDeadlineExceeded, remaining
+from .execution import PreparationBuffer, PhotoDeadlineExceeded, SystemMemoryPressure, remaining
 
 def diagnostic(error):
     if isinstance(error, ValidationError):
@@ -171,6 +171,8 @@ def analyze(store, cfg, limit=None, resume=False, retry_errors=False, force=Fals
                 except PhotoDeadlineExceeded as e:
                     timed_out=True
                     errors.append(diagnostic(e))
+                except (MemoryError,SystemMemoryPressure) as e:
+                    raise SystemMemoryPressure('CPU preprocessing could not allocate memory; source photo is not corrupt') from e
                 except Exception as e:
                     preparation_failed=True
                     errors.append(diagnostic(e))
@@ -210,6 +212,8 @@ def analyze(store, cfg, limit=None, resume=False, retry_errors=False, force=Fals
                         derived.mkdir(exist_ok=True)
                         (derived / f'{row["image_id"]}.jpg').write_bytes(image)
                         break
+                    except (MemoryError,SystemMemoryPressure) as e:
+                        raise SystemMemoryPressure('Insufficient system memory; keeping photo pending') from e
                     except Exception as e:
                         visual=None
                         raw = getattr(e, 'raw', raw)

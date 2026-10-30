@@ -12,6 +12,10 @@ class PhotoDeadlineExceeded(TimeoutError):
         self.raw=raw
 
 
+class SystemMemoryPressure(RuntimeError):
+    pass
+
+
 def remaining(deadline):
     value=deadline-time.monotonic()
     if value<=0:

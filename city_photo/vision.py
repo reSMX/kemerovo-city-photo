@@ -7,7 +7,7 @@ import socket
 import threading
 import time
 from urllib.parse import urlsplit
-from .execution import PhotoDeadlineExceeded, remaining
+from .execution import PhotoDeadlineExceeded, SystemMemoryPressure, remaining
 from .schemas import Visual, Orientation, visual_schema
 
 class TruncatedResponse(ValueError):
@@ -25,6 +25,14 @@ class Ollama:
         # Ignore environment proxy settings; all inference remains local.
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
         self.deadline=None
+        self.memory_abort=threading.Event()
+        self.active_cancel=None
+
+    def cancel_for_memory(self):
+        self.memory_abort.set()
+        cancel=self.active_cancel
+        if cancel:
+            cancel()
 
     def begin_photo(self,deadline):
         self.deadline=deadline
@@ -53,7 +61,10 @@ class Ollama:
         timer=threading.Timer(budget,cancel)
         timer.daemon=True
         timer.start()
+        self.active_cancel=cancel
         try:
+            if self.memory_abort.is_set():
+                raise SystemMemoryPressure('System commit reserve is low; unload model before resuming')
             conn.connect()
             sockets.append(conn.sock)
             remaining(end)
@@ -75,10 +86,13 @@ class Ollama:
                     part['message']={'content':''.join(chunks)}
                     return part
         except Exception as e:
+            if self.memory_abort.is_set():
+                raise SystemMemoryPressure('System commit reserve is low; request cancelled') from e
             if expired.is_set() or time.monotonic()>=end:
                 raise PhotoDeadlineExceeded(''.join(chunks)) from e
             raise
         finally:
+            self.active_cancel=None
             timer.cancel()
             for sock in sockets:
                 try:
@@ -94,7 +108,7 @@ class Ollama:
             data=json.dumps(body).encode() if body is not None else None,
             headers={'Content-Type': 'application/json'})
         try:
-            with self.opener.open(req, timeout=self.cfg.timeout) as r:
+            with self.opener.open(req, timeout=min(15,self.cfg.timeout)) as r:
                 return json.load(r)
         except urllib.error.HTTPError as e:
             message = e.read(8192).decode('utf-8', errors='replace')

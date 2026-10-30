@@ -9,6 +9,9 @@ from city_photo.config import load
 from city_photo.storage import Store,now
 from city_photo.pipeline import analyze,diagnostic
 from city_photo.export import export_all
+from city_photo.vision import Ollama
+from city_photo.execution import SystemMemoryPressure
+from city_photo.memory_guard import MemoryGuard, available_commit_bytes
 
 
 @contextmanager
@@ -55,6 +58,15 @@ def main():
         stop.unlink(missing_ok=True)
         status=dict(pid=os.getpid(),started_at=now(),state='running',config=str(Path(args.config).resolve()))
         last_export=0.0
+        backend=Ollama(cfg)
+        guard=MemoryGuard(backend.cancel_for_memory)
+        recoveries=0
+        def unload():
+            guard.paused=True
+            try:
+                backend.request('/api/generate',{'model':cfg.model,'keep_alive':0})
+            finally:
+                guard.paused=False
         def publish():
             status.update(updated_at=now(),statuses=dict(store.db.execute('SELECT status,count(*) FROM photos GROUP BY status').fetchall()))
             tmp=workspace/'analysis_status.json.tmp'
@@ -71,16 +83,32 @@ def main():
                     print(f'CSV export deferred: {type(e).__name__}',flush=True)
             if stop.exists():
                 raise KeyboardInterrupt()
+            if done%20==0:
+                print('Recycling Ollama runner to release accumulated host memory.',flush=True)
+                unload()
         awake=False
         try:
             if os.name=='nt':
                 import ctypes
                 awake=bool(ctypes.windll.kernel32.SetThreadExecutionState(0x80000001))
             publish()
+            guard.start()
             # Recompute all saved photo scores with current rules; no vision call here.
             export_all(store,cfg,args.output)
             last_export=time.monotonic()
-            report=analyze(store,cfg,resume=True,on_progress=checkpoint)
+            while True:
+                try:
+                    report=analyze(store,cfg,resume=True,on_progress=checkpoint,backend=backend)
+                    break
+                except SystemMemoryPressure:
+                    recoveries+=1
+                    status.update(memory_recoveries=recoveries)
+                    print('Memory reserve low: unloading model; saved photos retained.',flush=True)
+                    unload()
+                    reserve=available_commit_bytes()
+                    if recoveries>3 or (reserve is not None and reserve<4*1024**3):
+                        raise RuntimeError('Stopped for memory reserve; close other memory-heavy programs before resuming')
+                    backend.memory_abort.clear()
             status.update(state='completed',report=report)
         except KeyboardInterrupt:
             status['state']='stopped'
@@ -90,6 +118,7 @@ def main():
             print(diagnostic(e),flush=True)
             raise
         finally:
+            guard.close()
             try:
                 export_all(store,cfg,args.output)
             finally:
