@@ -342,6 +342,16 @@ shared_orientation.json, timings.csv со временем каждого кад
 независимых ручных разметок: macro-F1 около 0.8 и MAE до 2 — ориентиры, не обещание.
 Нет единого индекса города/двора и выводов о жителях или конструктивной безопасности.
 
+Для добавления других папок в ту же базу через веб-проект используйте
+[`import_folders.py`](https://github.com/reSMX/kemerovo-photo-map#импорт-папок-с-диска).
+Он проверяет дубликаты и добавляет новые фото без сброса старых оценок.
+Не меняйте `input_root` существующего workspace и не импортируйте другой корень
+штатной командой `import`: после добавления достаточно запустить `start_analysis.ps1`.
+
+Исходное техническое задание сохранено в
+[Codex_Kemerovo_Photo_Analysis_Prompt.md](Codex_Kemerovo_Photo_Analysis_Prompt.md).
+Это первоначальные требования; текущие параметры и команды описаны в этом README.
+
 Официальные источники, проверены 2026-10-29:
 https://docs.ollama.com/capabilities/vision,
 https://docs.ollama.com/capabilities/structured-outputs,
