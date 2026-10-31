@@ -104,6 +104,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\retry_failed_analysis.ps1
 `work/analysis_status.json` содержит `mode: retry_failed`, `retry_total`,
 `retry_completed` и фактический `photo_deadline_seconds: 180`.
 
+Для автоматического повтора после уже работающего прохода:
+
+```powershell
+$currentAnalysis = Get-Content .\work\analysis_status.json -Raw | ConvertFrom-Json
+powershell -NoProfile -ExecutionPolicy Bypass -File .\retry_after_current.ps1 -ExpectedStartedAt $currentAnalysis.started_at
+```
+
+Ожидание не запускает модель параллельно. Повтор начнётся только после успешного
+завершения именно этого прохода; ручная остановка или ошибка отменяет ожидание.
+Состояние ожидания хранится в `work/retry_schedule.json`. Чтобы отменить запланированный
+запуск до его начала, создайте `work/cancel_retry_schedule.request`.
+
 ## Установка Windows
 
 Проверено на Python 3.14.2, Windows, RTX 3060 12288 MiB. Требуется Python 3.11+.
