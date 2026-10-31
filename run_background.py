@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 import time
-from city_photo.config import load
+from city_photo.config import Config,load
 from city_photo.storage import Store,now
 from city_photo.pipeline import analyze,diagnostic
 from city_photo.export import export_all
@@ -44,27 +44,46 @@ def exclusive_workspace(path):
         handle.close()
 
 
+def failed_photo_ids(store):
+    """Only model failures with no saved result; never pending or assessed rows."""
+    return {row[0] for row in store.db.execute("SELECT image_id FROM photos WHERE status IN ('model_error','manual_review') AND (visual IS NULL OR visual='')")}
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config',default='config.full.yaml')
     parser.add_argument('--workspace',default='work')
     parser.add_argument('--output',default='output')
+    parser.add_argument('--retry-failed-only',action='store_true',help='Retry only model errors and timeouts without a saved result')
+    parser.add_argument('--photo-deadline-seconds',type=float,help='Override total time per photo (maximum 180 seconds)')
     parser.add_argument('--memory-guard',action=argparse.BooleanOptionalAction,default=False,
                         help='Stop when Windows commit reserve is low (disabled by default)')
     args=parser.parse_args()
     cfg=load(args.config)
+    if args.photo_deadline_seconds is not None:
+        cfg=Config.model_validate(cfg.model_dump() | {'photo_deadline_seconds':args.photo_deadline_seconds})
     workspace=Path(args.workspace).resolve()
     with exclusive_workspace(workspace):
         store=Store(workspace)
+        retry_targets=failed_photo_ids(store) if args.retry_failed_only else None
+        retry_total=len(retry_targets) if retry_targets is not None else None
         stop=workspace/'stop.request'
         stop.unlink(missing_ok=True)
         status=dict(pid=os.getpid(),started_at=now(),state='running',config=str(Path(args.config).resolve()),
-                    memory_guard_enabled=args.memory_guard)
+                    memory_guard_enabled=args.memory_guard,photo_deadline_seconds=cfg.photo_deadline_seconds,
+                    mode='retry_failed' if args.retry_failed_only else 'all')
+        if args.retry_failed_only:
+            status.update(retry_total=retry_total,retry_completed=0)
+            print(f'Retry mode: {retry_total} failed photos; {cfg.photo_deadline_seconds:g} seconds per photo.',flush=True)
         last_export=0.0
         backend=Ollama(cfg)
         guard=MemoryGuard(backend.cancel_for_memory)
         recoveries=0
         total_recoveries=0
+        def photo_done(image_id):
+            if retry_targets is not None:
+                retry_targets.discard(image_id)
+                status['retry_completed']=retry_total-len(retry_targets)
         def unload():
             guard.paused=True
             try:
@@ -116,7 +135,11 @@ def main():
             last_export=time.monotonic()
             while True:
                 try:
-                    report=analyze(store,cfg,resume=True,on_progress=checkpoint,backend=backend)
+                    if retry_targets is not None and not retry_targets:
+                        report={'processed':status['retry_completed'],'no_remaining_failures':True}
+                        break
+                    report=analyze(store,cfg,resume=True,retry_errors=args.retry_failed_only,
+                                   image_ids=retry_targets,on_photo_done=photo_done,on_progress=checkpoint,backend=backend)
                     break
                 except SystemMemoryPressure:
                     recoveries+=1

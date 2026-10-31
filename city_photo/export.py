@@ -137,7 +137,7 @@ def dictionary():
         'near_duplicate_group_id': 'Кандидаты dHash, оценки не копируются', 'map_hash': 'Версия карты и геоправил',
         'courtyard_id': 'Только подтверждённый вручную ID; GPS — положение камеры',
         'courtyard_candidate_id': 'Кандидаты по карте, не координата объекта',
-        'processing_status': 'pending/processed/processed_with_review/unreadable/unsupported/model_error/manual_review (90-second deadline)',
+        'processing_status': 'pending/processed/processed_with_review/unreadable/unsupported/model_error/manual_review (photo deadline exceeded)',
         'surface_type': 'paved/unpaved/mixed/unknown', 'mural_status': 'mural/no_mural/mural_or_graffiti_uncertain',
         'photo_score': 'Экспериментальный балл видимого состояния 0–10, больше лучше; не индекс двора/города',
         'photo_score_status': 'available/provisional/insufficient_data; ни один статус не доказывает точность',

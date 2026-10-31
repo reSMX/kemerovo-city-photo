@@ -1,3 +1,4 @@
+param([switch]$RetryFailed)
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 $taskPython = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'
@@ -15,5 +16,7 @@ while ((Get-Date) -lt $taskDeadline) {
     } catch { Start-Sleep -Milliseconds 500 }
 }
 if (-not $taskReady) { throw 'Ollama did not become ready on localhost:11434' }
-& $taskPython -u (Join-Path $PSScriptRoot 'run_background.py') --config (Join-Path $PSScriptRoot 'config.full.yaml') --workspace (Join-Path $PSScriptRoot 'work') --output (Join-Path $PSScriptRoot 'output') --no-memory-guard
+$analysisArguments = @('-u', (Join-Path $PSScriptRoot 'run_background.py'), '--config', (Join-Path $PSScriptRoot 'config.full.yaml'), '--workspace', (Join-Path $PSScriptRoot 'work'), '--output', (Join-Path $PSScriptRoot 'output'), '--no-memory-guard')
+if ($RetryFailed) { $analysisArguments += @('--retry-failed-only', '--photo-deadline-seconds', '180') }
+& $taskPython @analysisArguments
 exit $LASTEXITCODE

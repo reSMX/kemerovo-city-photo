@@ -109,7 +109,7 @@ def geolocate(store, cfg):
         result = geo.locate(effective_metadata(store, row), visual)
         store.update(row['image_id'], geo=result)
 
-def analyze(store, cfg, limit=None, resume=False, retry_errors=False, force=False, dry_run=False, backend=None, on_progress=None):
+def analyze(store, cfg, limit=None, resume=False, retry_errors=False, force=False, dry_run=False, backend=None, on_progress=None, image_ids=None, on_photo_done=None):
     backend = backend or Ollama(cfg)
     prompt, rubric = cfg.assets()
     if dry_run:
@@ -129,6 +129,8 @@ def analyze(store, cfg, limit=None, resume=False, retry_errors=False, force=Fals
         geo = Geography(cfg.model_copy(update={'map_path': None, 'courtyards_path': None}))
     selected=[]
     for row in store.rows():
+        if image_ids is not None and row['image_id'] not in image_ids:
+            continue
         if row['status'] in ('unsupported', 'unreadable'):
             continue
         rotation_override = store.overrides(row['image_id']).get('clockwise_rotation')
@@ -260,6 +262,8 @@ def analyze(store, cfg, limit=None, resume=False, retry_errors=False, force=Fals
             print(f'{done} processed, {remaining_count} remaining | {row["relative_path"]} | {elapsed:.1f}s | ETA {eta}', flush=True)
             if hasattr(backend,'end_photo'):
                 backend.end_photo()
+            if on_photo_done:
+                on_photo_done(row['image_id'])
             if on_progress:
                 on_progress(done)
     finally:
