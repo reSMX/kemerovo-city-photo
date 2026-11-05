@@ -1,4 +1,4 @@
-from compare_models import compare_metrics, write_review_csv
+from scripts.compare_models import compare_metrics, write_review_csv
 
 def test_comparison_excludes_null_and_errors():
     left=[dict(processing_status='processed',territory_type='street',road_present=1,road_damage_score=2),

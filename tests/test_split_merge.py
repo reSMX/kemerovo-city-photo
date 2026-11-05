@@ -1,8 +1,8 @@
 import csv
 from PIL import Image
 import pytest
-from split_photos import split_photos, verify_batch
-from merge_results import merge_results
+from scripts.split_photos import split_photos, verify_batch
+from scripts.merge_results import merge_results
 from city_photo.export import write_csv
 from city_photo.metadata import sha_file
 

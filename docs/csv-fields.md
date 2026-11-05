@@ -131,7 +131,7 @@ UTF-8 BOM; разделитель ; по умолчанию. Пустая яче
 | courtyard_assignment_status | candidate/confirmed/unknown; подтверждение отдельным ручным решением |
 | playground_courtyard_link_status | candidate/confirmed/unknown; подтверждение отдельным ручным решением |
 | parking_courtyard_link_status | candidate/confirmed/unknown; подтверждение отдельным ручным решением |
-| processing_status | pending/processed/processed_with_review/unreadable/unsupported/model_error/manual_review (90-second deadline) |
+| processing_status | pending/processed/processed_with_review/unreadable/unsupported/model_error/manual_review (photo deadline exceeded) |
 | needs_review | 0/1, требуется проверка |
 | review_reasons | Наблюдаемое объяснение или причина ограничения/проверки |
 | error | Ошибка чтения или модели, без base64 |

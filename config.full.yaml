@@ -22,9 +22,9 @@ gps_buffer_m: 30.0
 normalize_timezone: false
 timezone_assumption: Asia/Krasnoyarsk
 delimiter: ';'
-prompt_path: prompts/assessment.txt
-rubric_path: rubric.yaml
-photo_scoring_path: photo_scoring.yaml
+prompt_path: city_photo/resources/assessment.txt
+rubric_path: city_photo/resources/rubric.yaml
+photo_scoring_path: city_photo/resources/photo_scoring.yaml
 photo_deadline_seconds: 90.0
 preprocess_workers: 1
 preprocess_buffer: 2
